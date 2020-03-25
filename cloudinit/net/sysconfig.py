@@ -163,44 +163,45 @@ class Route(ConfigMap):
         # need to reindex IPv4 addresses
         # (because Route can contain a mix of IPv4 and IPv6)
         reindex = -1
-        for key in sorted(self._conf.keys()):
-            if 'ADDRESS' in key:
-                index = key.replace('ADDRESS', '')
-                address_value = str(self._conf[key])
-                # only accept combinations:
-                # if proto ipv6 only display ipv6 routes
-                # if proto ipv4 only display ipv4 routes
-                # do not add ipv6 routes if proto is ipv4
-                # do not add ipv4 routes if proto is ipv6
-                # (this array will contain a mix of ipv4 and ipv6)
-                if proto == "ipv4" and not self.is_ipv6_route(address_value):
-                    netmask_value = str(self._conf['NETMASK' + index])
-                    gateway_value = str(self._conf['GATEWAY' + index])
-                    # increase IPv4 index
-                    reindex = reindex + 1
-                    buf.write("%s=%s\n" % ('ADDRESS' + str(reindex),
-                                           _quote_value(address_value)))
-                    buf.write("%s=%s\n" % ('GATEWAY' + str(reindex),
-                                           _quote_value(gateway_value)))
-                    buf.write("%s=%s\n" % ('NETMASK' + str(reindex),
-                                           _quote_value(netmask_value)))
-                    metric_key = 'METRIC' + index
-                    if metric_key in self._conf:
-                        metric_value = str(self._conf['METRIC' + index])
-                        buf.write("%s=%s\n" % ('METRIC' + str(reindex),
-                                               _quote_value(metric_value)))
-                elif proto == "ipv6" and self.is_ipv6_route(address_value):
-                    netmask_value = str(self._conf['NETMASK' + index])
-                    gateway_value = str(self._conf['GATEWAY' + index])
-                    metric_value = (
-                        'metric ' + str(self._conf['METRIC' + index])
-                        if 'METRIC' + index in self._conf else '')
-                    buf.write(
-                        "%s/%s via %s %s dev %s\n" % (address_value,
-                                                      netmask_value,
-                                                      gateway_value,
-                                                      metric_value,
-                                                      self._route_name))
+        address_keys = filter(lambda key : key.startswith('ADDRESS'),
+                              self._conf.keys())
+        for key in sorted(address_keys):
+            index = key.replace('ADDRESS', '')
+            address_value = str(self._conf[key])
+            # only accept combinations:
+            # if proto ipv6 only display ipv6 routes
+            # if proto ipv4 only display ipv4 routes
+            # do not add ipv6 routes if proto is ipv4
+            # do not add ipv4 routes if proto is ipv6
+            # (this array will contain a mix of ipv4 and ipv6)
+            if proto == "ipv4" and not self.is_ipv6_route(address_value):
+                netmask_value = str(self._conf['NETMASK' + index])
+                gateway_value = str(self._conf['GATEWAY' + index])
+                # increase IPv4 index
+                reindex = reindex + 1
+                buf.write("%s=%s\n" % ('ADDRESS' + str(reindex),
+                                       _quote_value(address_value)))
+                buf.write("%s=%s\n" % ('GATEWAY' + str(reindex),
+                                       _quote_value(gateway_value)))
+                buf.write("%s=%s\n" % ('NETMASK' + str(reindex),
+                                       _quote_value(netmask_value)))
+                metric_key = 'METRIC' + index
+                if metric_key in self._conf:
+                    metric_value = str(self._conf['METRIC' + index])
+                    buf.write("%s=%s\n" % ('METRIC' + str(reindex),
+                                           _quote_value(metric_value)))
+            elif proto == "ipv6" and self.is_ipv6_route(address_value):
+                netmask_value = str(self._conf['NETMASK' + index])
+                gateway_value = str(self._conf['GATEWAY' + index])
+                metric_value = (
+                    'metric ' + str(self._conf['METRIC' + index])
+                    if 'METRIC' + index in self._conf else '')
+                buf.write(
+                    "%s/%s via %s %s dev %s\n" % (address_value,
+                                                  netmask_value,
+                                                  gateway_value,
+                                                  metric_value,
+                                                  self._route_name))
 
         return buf.getvalue()
 
