@@ -513,11 +513,9 @@ class Renderer(renderer.Renderer):
                         net_prefix_to_ipv4_mask(subnet['prefix'])
 
                 if 'gateway' in subnet and flavor != 'suse':
-                    iface_cfg['DEFROUTE'] = True
-                    if is_ipv6_addr(subnet['gateway']):
-                        iface_cfg['IPV6_DEFAULTGW'] = subnet['gateway']
-                    else:
-                        iface_cfg['GATEWAY'] = subnet['gateway']
+                    cls._set_default_route(
+                        iface_cfg, subnet['gateway'],
+                        subnet['metric'] if 'metric' in subnet else None)
 
                 if 'dns_search' in subnet and flavor != 'suse':
                     iface_cfg['DOMAIN'] = ' '.join(subnet['dns_search'])
@@ -538,44 +536,36 @@ class Renderer(renderer.Renderer):
         # patch in their package.
         if flavor == 'suse':
             return
-        for _, subnet in enumerate(subnets, start=len(iface_cfg.children)):
+
+        for subnet in subnets:
             subnet_type = subnet.get('type')
             for route in subnet.get('routes', []):
-                is_ipv6 = subnet.get('ipv6') or is_ipv6_addr(route['gateway'])
-
+                # Determine if this is a default or normal route and handle it
+                # appropriately.
+                #
                 # Any dynamic configuration method, slaac, dhcpv6-stateful/
                 # stateless should get router information from router RA's.
                 if (_is_default_route(route) and subnet_type not in
                         IPV6_DYNAMIC_TYPES):
-                    if (
-                            (subnet.get('ipv4') and
-                             route_cfg.has_set_default_ipv4) or
-                            (subnet.get('ipv6') and
-                             route_cfg.has_set_default_ipv6)
-                    ):
+                    is_ipv6 = is_ipv6_addr(route['gateway'])
+                    if (route_cfg.has_set_default_ipv6 and is_ipv6) or \
+                        (route_cfg.has_set_default_ipv4 and not is_ipv6):
                         raise ValueError("Duplicate declaration of default "
                                          "route found for interface '%s'"
                                          % (iface_cfg.name))
-                    # NOTE(harlowja): ipv6 and ipv4 default gateways
-                    gw_key = 'GATEWAY0'
-                    nm_key = 'NETMASK0'
-                    addr_key = 'ADDRESS0'
+                    if is_ipv6:
+                        route_cfg.has_set_default_ipv6 = True
+                    else:
+                        route_cfg.has_set_default_ipv4 = True
                     # The owning interface provides the default route.
                     #
                     # TODO(harlowja): add validation that no other iface has
                     # also provided the default route?
-                    iface_cfg['DEFROUTE'] = True
+                    cls._set_default_route(
+                        iface_cfg, route['gateway'],
+                        route['metric'] if 'metric' in route else None)
                     if iface_cfg['BOOTPROTO'] in ('dhcp', 'dhcp4'):
                         iface_cfg['DHCLIENT_SET_DEFAULT_ROUTE'] = True
-                    if 'gateway' in route:
-                        if is_ipv6:
-                            iface_cfg['IPV6_DEFAULTGW'] = route['gateway']
-                            route_cfg.has_set_default_ipv6 = True
-                        else:
-                            iface_cfg['GATEWAY'] = route['gateway']
-                            route_cfg.has_set_default_ipv4 = True
-                    if 'metric' in route:
-                        iface_cfg['METRIC'] = route['metric']
 
                 else:
                     gw_key = 'GATEWAY%s' % route_cfg.last_idx
@@ -591,6 +581,16 @@ class Renderer(renderer.Renderer):
                                                ('network', addr_key)]:
                         if old_key in route:
                             route_cfg[new_key] = route[old_key]
+
+    @classmethod
+    def _set_default_route(cls, iface_cfg, gateway, metric):
+        iface_cfg['DEFROUTE'] = True
+        if is_ipv6_addr(gateway):
+            iface_cfg['IPV6_DEFAULTGW'] = gateway
+        else:
+            iface_cfg['GATEWAY'] = gateway
+        if metric is not None:
+            iface_cfg['METRIC'] = metric
 
     @classmethod
     def _render_bonding_opts(cls, iface_cfg, iface):
