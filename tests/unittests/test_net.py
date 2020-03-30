@@ -864,6 +864,11 @@ NETWORK_CONFIGS = {
                 IPADDR=192.168.21.3
                 NETMASK=255.255.255.0
                 STARTMODE=auto"""),
+            'ifroute-eth99': """\
+# Created by cloud-init on instance boot automatically, do not edit.
+#
+default 65.61.151.37 - - metric 10000
+""",
         },
         'expected_sysconfig_rhel': {
             'ifcfg-eth1': textwrap.dedent("""\
@@ -1552,6 +1557,11 @@ pre-down route del -net 10.0.0.0/8 gw 11.0.0.1 metric 3 || true
                 BRIDGE_PORTS='eth3 eth4'
                 STARTMODE=auto
                 BRIDGE_STP=off"""),
+            'ifroute-br0': """\
+# Created by cloud-init on instance boot automatically, do not edit.
+#
+default 2001:4800:78ff:1b::1 - -
+""",
             'ifcfg-eth0': textwrap.dedent("""\
                 BOOTPROTO=static
                 LLADDR=c0:d6:9f:2c:e8:80
@@ -1566,6 +1576,11 @@ pre-down route del -net 10.0.0.0/8 gw 11.0.0.1 metric 3 || true
                 ETHERDEVICE=eth0
                 STARTMODE=auto
                 VLAN_ID=101"""),
+            'ifroute-eth0.101': """\
+# Created by cloud-init on instance boot automatically, do not edit.
+#
+default 192.168.0.1 - -
+""",
             'ifcfg-eth1': textwrap.dedent("""\
                 BOOTPROTO=none
                 LLADDR=aa:d6:9f:2c:e8:80
@@ -2131,6 +2146,14 @@ iface bond0 inet6 static
         NETMASK1=255.255.255.0
         STARTMODE=auto
         """),
+            'ifroute-bond0': textwrap.dedent("""\
+        # Created by cloud-init on instance boot automatically, do not edit.
+        #
+        default 192.168.0.1 - -
+        10.1.3.0/24 192.168.0.3 - -
+        2001:67c:1/32 2001:67c:1562:1 - -
+        3001:67c:1/32 3001:67c:1562:1 - - metric 10000
+        """),
             'ifcfg-bond0s0': textwrap.dedent("""\
         BOOTPROTO=none
         LLADDR=aa:bb:cc:dd:e8:00
@@ -2248,6 +2271,12 @@ iface bond0 inet6 static
                 ETHERDEVICE=en0
                 VLAN_ID=99
             """),
+            'ifroute-en0.99': """\
+# Created by cloud-init on instance boot automatically, do not edit.
+#
+default 192.168.1.1 - -
+default 2001:1::1 - -
+""",
         },
         'expected_sysconfig_rhel': {
             'ifcfg-en0': textwrap.dedent("""\
@@ -3447,14 +3476,24 @@ class TestOpenSuseSysConfigRendering(CiTestCase):
         return dir2dict(dir)
 
     def _compare_files_to_expected(self, expected, found):
+
+        def _try_load(f):
+            ''' Attempt to load shell content, otherwise return as-is '''
+            try:
+                return util.load_shell_content(f)
+            except ValueError:
+                pass
+            # ifroute- * files aren't shell content
+            return f
+
         orig_maxdiff = self.maxDiff
         expected_d = dict(
-            (os.path.join(self.scripts_dir, k), util.load_shell_content(v))
+            (os.path.join(self.scripts_dir, k), _try_load(v))
             for k, v in expected.items())
 
         # only compare the files in scripts_dir
         scripts_found = dict(
-            (k, util.load_shell_content(v)) for k, v in found.items()
+            (k, _try_load(v)) for k, v in found.items()
             if k.startswith(self.scripts_dir))
         try:
             self.maxDiff = None
@@ -3502,83 +3541,81 @@ STARTMODE=auto
 """.lstrip()
             self.assertEqual(expected_content, content)
 
-    # TODO(rjschwei): re-enable test once route writing is implemented
-    # for SUSE distros
-#    def test_multiple_ipv4_default_gateways(self):
-#        """ValueError is raised when duplicate ipv4 gateways exist."""
-#        net_json = {
-#            "services": [{"type": "dns", "address": "172.19.0.12"}],
-#            "networks": [{
-#                "network_id": "dacd568d-5be6-4786-91fe-750c374b78b4",
-#                "type": "ipv4", "netmask": "255.255.252.0",
-#                "link": "tap1a81968a-79",
-#                "routes": [{
-#                    "netmask": "0.0.0.0",
-#                    "network": "0.0.0.0",
-#                    "gateway": "172.19.3.254",
-#                }, {
-#                    "netmask": "0.0.0.0",  # A second default gateway
-#                    "network": "0.0.0.0",
-#                    "gateway": "172.20.3.254",
-#                }],
-#                "ip_address": "172.19.1.34", "id": "network0"
-#            }],
-#            "links": [
-#                {
-#                    "ethernet_mac_address": "fa:16:3e:ed:9a:59",
-#                    "mtu": None, "type": "bridge", "id":
-#                    "tap1a81968a-79",
-#                    "vif_id": "1a81968a-797a-400f-8a80-567f997eb93f"
-#                },
-#            ],
-#        }
-#        macs = {'fa:16:3e:ed:9a:59': 'eth0'}
-#        render_dir = self.tmp_dir()
-#        network_cfg = openstack.convert_net_json(net_json, known_macs=macs)
-#        ns = network_state.parse_net_config_data(network_cfg,
-#                                                 skip_broken=False)
-#        renderer = self._get_renderer()
-#        with self.assertRaises(ValueError):
-#            renderer.render_network_state(ns, target=render_dir)
-#        self.assertEqual([], os.listdir(render_dir))
-#
-#    def test_multiple_ipv6_default_gateways(self):
-#        """ValueError is raised when duplicate ipv6 gateways exist."""
-#        net_json = {
-#            "services": [{"type": "dns", "address": "172.19.0.12"}],
-#            "networks": [{
-#                "network_id": "public-ipv6",
-#                "type": "ipv6", "netmask": "",
-#                "link": "tap1a81968a-79",
-#                "routes": [{
-#                    "gateway": "2001:DB8::1",
-#                    "netmask": "::",
-#                    "network": "::"
-#                }, {
-#                    "gateway": "2001:DB9::1",
-#                    "netmask": "::",
-#                    "network": "::"
-#                }],
-#                "ip_address": "2001:DB8::10", "id": "network1"
-#            }],
-#            "links": [
-#                {
-#                    "ethernet_mac_address": "fa:16:3e:ed:9a:59",
-#                    "mtu": None, "type": "bridge", "id":
-#                    "tap1a81968a-79",
-#                    "vif_id": "1a81968a-797a-400f-8a80-567f997eb93f"
-#                },
-#            ],
-#        }
-#        macs = {'fa:16:3e:ed:9a:59': 'eth0'}
-#        render_dir = self.tmp_dir()
-#        network_cfg = openstack.convert_net_json(net_json, known_macs=macs)
-#        ns = network_state.parse_net_config_data(network_cfg,
-#                                                 skip_broken=False)
-#        renderer = self._get_renderer()
-#        with self.assertRaises(ValueError):
-#            renderer.render_network_state(ns, target=render_dir)
-#        self.assertEqual([], os.listdir(render_dir))
+    def test_multiple_ipv4_default_gateways(self):
+        """ValueError is raised when duplicate ipv4 gateways exist."""
+        net_json = {
+            "services": [{"type": "dns", "address": "172.19.0.12"}],
+            "networks": [{
+                "network_id": "dacd568d-5be6-4786-91fe-750c374b78b4",
+                "type": "ipv4", "netmask": "255.255.252.0",
+                "link": "tap1a81968a-79",
+                "routes": [{
+                    "netmask": "0.0.0.0",
+                    "network": "0.0.0.0",
+                    "gateway": "172.19.3.254",
+                }, {
+                    "netmask": "0.0.0.0",  # A second default gateway
+                    "network": "0.0.0.0",
+                    "gateway": "172.20.3.254",
+                }],
+                "ip_address": "172.19.1.34", "id": "network0"
+            }],
+            "links": [
+                {
+                    "ethernet_mac_address": "fa:16:3e:ed:9a:59",
+                    "mtu": None, "type": "bridge", "id":
+                    "tap1a81968a-79",
+                    "vif_id": "1a81968a-797a-400f-8a80-567f997eb93f"
+                },
+            ],
+        }
+        macs = {'fa:16:3e:ed:9a:59': 'eth0'}
+        render_dir = self.tmp_dir()
+        network_cfg = openstack.convert_net_json(net_json, known_macs=macs)
+        ns = network_state.parse_net_config_data(network_cfg,
+                                                 skip_broken=False)
+        renderer = self._get_renderer()
+        with self.assertRaises(ValueError):
+            renderer.render_network_state(ns, target=render_dir)
+        self.assertEqual([], os.listdir(render_dir))
+
+    def test_multiple_ipv6_default_gateways(self):
+        """ValueError is raised when duplicate ipv6 gateways exist."""
+        net_json = {
+            "services": [{"type": "dns", "address": "172.19.0.12"}],
+            "networks": [{
+                "network_id": "public-ipv6",
+                "type": "ipv6", "netmask": "",
+                "link": "tap1a81968a-79",
+                "routes": [{
+                    "gateway": "2001:DB8::1",
+                    "netmask": "::",
+                    "network": "::"
+                }, {
+                    "gateway": "2001:DB9::1",
+                    "netmask": "::",
+                    "network": "::"
+                }],
+                "ip_address": "2001:DB8::10", "id": "network1"
+            }],
+            "links": [
+                {
+                    "ethernet_mac_address": "fa:16:3e:ed:9a:59",
+                    "mtu": None, "type": "bridge", "id":
+                    "tap1a81968a-79",
+                    "vif_id": "1a81968a-797a-400f-8a80-567f997eb93f"
+                },
+            ],
+        }
+        macs = {'fa:16:3e:ed:9a:59': 'eth0'}
+        render_dir = self.tmp_dir()
+        network_cfg = openstack.convert_net_json(net_json, known_macs=macs)
+        ns = network_state.parse_net_config_data(network_cfg,
+                                                 skip_broken=False)
+        renderer = self._get_renderer()
+        with self.assertRaises(ValueError):
+            renderer.render_network_state(ns, target=render_dir)
+        self.assertEqual([], os.listdir(render_dir))
 
     def test_openstack_rendering_samples(self):
         for os_sample in OS_SAMPLES:

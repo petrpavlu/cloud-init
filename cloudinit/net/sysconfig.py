@@ -14,7 +14,8 @@ from cloudinit.distros.parsers import resolv_conf
 
 from . import renderer
 from .network_state import (
-    is_ipv6_addr, net_prefix_to_ipv4_mask, subnet_is_ipv6, IPV6_DYNAMIC_TYPES)
+    is_ipv6_addr, net_prefix_to_ipv4_mask, subnet_is_ipv6, mask_to_net_prefix,
+    IPV6_DYNAMIC_TYPES)
 
 LOG = logging.getLogger(__name__)
 NM_CFG_FILE = "/etc/NetworkManager/NetworkManager.conf"
@@ -152,10 +153,13 @@ class Route(ConfigMap):
     def is_ipv6_route(self, address):
         return ':' in address
 
-    def to_string(self, proto="ipv4"):
-        # only accept ipv4 and ipv6
-        if proto not in ['ipv4', 'ipv6']:
-            raise ValueError("Unknown protocol '%s'" % (str(proto)))
+    def to_string(self, proto, flavor):
+        # Only accept 'all', 'ipv4' and 'ipv6'.
+        assert proto in ('all', 'ipv4', 'ipv6')
+        # The 'all' option makes sense only for the SUSE flavor because its
+        # IPv4 and IPv6 routes have the same format.
+        assert flavor == 'suse' or proto != 'all'
+
         buf = io.StringIO()
         buf.write(_make_header())
         if self._conf:
@@ -163,45 +167,58 @@ class Route(ConfigMap):
         # need to reindex IPv4 addresses
         # (because Route can contain a mix of IPv4 and IPv6)
         reindex = -1
-        address_keys = filter(lambda key : key.startswith('ADDRESS'),
+        address_keys = filter(lambda key: key.startswith('ADDRESS'),
                               self._conf.keys())
         for key in sorted(address_keys):
             index = key.replace('ADDRESS', '')
             address_value = str(self._conf[key])
+            netmask_value = str(self._conf['NETMASK' + index])
+            gateway_value = str(self._conf['GATEWAY' + index])
+            metric_value = (
+                str(self._conf['METRIC' + index])
+                if 'METRIC' + index in self._conf else '')
             # only accept combinations:
             # if proto ipv6 only display ipv6 routes
             # if proto ipv4 only display ipv4 routes
             # do not add ipv6 routes if proto is ipv4
             # do not add ipv4 routes if proto is ipv6
             # (this array will contain a mix of ipv4 and ipv6)
-            if proto == "ipv4" and not self.is_ipv6_route(address_value):
-                netmask_value = str(self._conf['NETMASK' + index])
-                gateway_value = str(self._conf['GATEWAY' + index])
-                # increase IPv4 index
-                reindex = reindex + 1
-                buf.write("%s=%s\n" % ('ADDRESS' + str(reindex),
-                                       _quote_value(address_value)))
-                buf.write("%s=%s\n" % ('GATEWAY' + str(reindex),
-                                       _quote_value(gateway_value)))
-                buf.write("%s=%s\n" % ('NETMASK' + str(reindex),
-                                       _quote_value(netmask_value)))
-                metric_key = 'METRIC' + index
-                if metric_key in self._conf:
-                    metric_value = str(self._conf['METRIC' + index])
-                    buf.write("%s=%s\n" % ('METRIC' + str(reindex),
-                                           _quote_value(metric_value)))
-            elif proto == "ipv6" and self.is_ipv6_route(address_value):
-                netmask_value = str(self._conf['NETMASK' + index])
-                gateway_value = str(self._conf['GATEWAY' + index])
-                metric_value = (
-                    'metric ' + str(self._conf['METRIC' + index])
-                    if 'METRIC' + index in self._conf else '')
-                buf.write(
-                    "%s/%s via %s %s dev %s\n" % (address_value,
-                                                  netmask_value,
-                                                  gateway_value,
-                                                  metric_value,
-                                                  self._route_name))
+            is_ipv6 = self.is_ipv6_route(address_value)
+            if flavor == 'suse':
+                if proto == 'all' or (proto == 'ipv4' and not is_ipv6) or \
+                                     (proto == 'ipv6' and is_ipv6):
+                    if address_value == 'default':
+                        destination = 'default'
+                    else:
+                        prefix = mask_to_net_prefix(netmask_value)
+                        destination = '%s/%s' % (address_value, prefix)
+                    metric_string = ' metric ' + metric_value \
+                        if metric_value else ''
+                    buf.write('%s %s - -%s\n' % (destination,
+                                                 gateway_value,
+                                                 metric_string))
+            else:
+                if proto == 'ipv4' and not is_ipv6:
+                    # increase IPv4 index
+                    reindex = reindex + 1
+                    buf.write("%s=%s\n" % ('ADDRESS' + str(reindex),
+                                           _quote_value(address_value)))
+                    buf.write("%s=%s\n" % ('GATEWAY' + str(reindex),
+                                           _quote_value(gateway_value)))
+                    buf.write("%s=%s\n" % ('NETMASK' + str(reindex),
+                                           _quote_value(netmask_value)))
+                    if metric_value:
+                        buf.write("%s=%s\n" % ('METRIC' + str(reindex),
+                                               _quote_value(metric_value)))
+                elif proto == 'ipv6' and is_ipv6:
+                    metric_string = 'metric ' + metric_value \
+                        if metric_value else ''
+                    buf.write(
+                        "%s/%s via %s %s dev %s\n" % (address_value,
+                                                      netmask_value,
+                                                      gateway_value,
+                                                      metric_string,
+                                                      self._route_name))
 
         return buf.getvalue()
 
@@ -356,7 +373,8 @@ class Renderer(renderer.Renderer):
                     iface_cfg[new_key] = old_value
 
     @classmethod
-    def _render_subnets(cls, iface_cfg, subnets, has_default_route, flavor):
+    def _render_subnets(cls, iface_cfg, route_cfg, subnets, has_default_route,
+                        flavor):
         # setting base values
         if flavor == 'suse':
             iface_cfg['BOOTPROTO'] = 'static'
@@ -513,10 +531,11 @@ class Renderer(renderer.Renderer):
                     iface_cfg['NETMASK' + suff] = \
                         net_prefix_to_ipv4_mask(subnet['prefix'])
 
-                if 'gateway' in subnet and flavor != 'suse':
+                if 'gateway' in subnet:
                     cls._set_default_route(
-                        iface_cfg, subnet['gateway'],
-                        subnet['metric'] if 'metric' in subnet else None)
+                        iface_cfg, route_cfg, subnet['gateway'],
+                        subnet['metric'] if 'metric' in subnet else None,
+                        flavor)
 
                 if 'dns_search' in subnet and flavor != 'suse':
                     iface_cfg['DOMAIN'] = ' '.join(subnet['dns_search'])
@@ -532,12 +551,6 @@ class Renderer(renderer.Renderer):
 
     @classmethod
     def _render_subnet_routes(cls, iface_cfg, route_cfg, subnets, flavor):
-        # TODO(rjschwei): route configuration on SUSE distro happens via
-        # ifroute-* files, see lp#1812117. SUSE currently carries a local
-        # patch in their package.
-        if flavor == 'suse':
-            return
-
         for subnet in subnets:
             subnet_type = subnet.get('type')
             for route in subnet.get('routes', []):
@@ -550,7 +563,7 @@ class Renderer(renderer.Renderer):
                         IPV6_DYNAMIC_TYPES):
                     is_ipv6 = is_ipv6_addr(route['gateway'])
                     if (route_cfg.has_set_default_ipv6 and is_ipv6) or \
-                        (route_cfg.has_set_default_ipv4 and not is_ipv6):
+                            (route_cfg.has_set_default_ipv4 and not is_ipv6):
                         raise ValueError("Duplicate declaration of default "
                                          "route found for interface '%s'"
                                          % (iface_cfg.name))
@@ -563,9 +576,10 @@ class Renderer(renderer.Renderer):
                     # TODO(harlowja): add validation that no other iface has
                     # also provided the default route?
                     cls._set_default_route(
-                        iface_cfg, route['gateway'],
-                        route['metric'] if 'metric' in route else None)
-                    if iface_cfg['BOOTPROTO'] in ('dhcp', 'dhcp4'):
+                        iface_cfg, route_cfg, route['gateway'],
+                        route['metric'] if 'metric' in route else None, flavor)
+                    if flavor != 'suse' and \
+                            iface_cfg['BOOTPROTO'] in ('dhcp', 'dhcp4'):
                         iface_cfg['DHCLIENT_SET_DEFAULT_ROUTE'] = True
 
                 else:
@@ -574,8 +588,6 @@ class Renderer(renderer.Renderer):
                     addr_key = 'ADDRESS%s' % route_cfg.last_idx
                     metric_key = 'METRIC%s' % route_cfg.last_idx
                     route_cfg.last_idx += 1
-                    # add default routes only to ifcfg files, not
-                    # to route-* or route6-*
                     for (old_key, new_key) in [('gateway', gw_key),
                                                ('metric', metric_key),
                                                ('netmask', nm_key),
@@ -584,14 +596,25 @@ class Renderer(renderer.Renderer):
                             route_cfg[new_key] = route[old_key]
 
     @classmethod
-    def _set_default_route(cls, iface_cfg, gateway, metric):
-        iface_cfg['DEFROUTE'] = True
-        if is_ipv6_addr(gateway):
-            iface_cfg['IPV6_DEFAULTGW'] = gateway
+    def _set_default_route(cls, iface_cfg, route_cfg, gateway, metric, flavor):
+        # With the SUSE flavor, the default route is written with other routes
+        # into the ifroute-<interface> file. For RH, it is recorded in the
+        # ifcfg-<interface> file.
+        if flavor == 'suse':
+            route_cfg['GATEWAY%s' % route_cfg.last_idx] = gateway
+            route_cfg['ADDRESS%s' % route_cfg.last_idx] = 'default'
+            route_cfg['NETMASK%s' % route_cfg.last_idx] = ''
+            if metric is not None:
+                route_cfg['METRIC%s' % route_cfg.last_idx] = metric
+            route_cfg.last_idx += 1
         else:
-            iface_cfg['GATEWAY'] = gateway
-        if metric is not None:
-            iface_cfg['METRIC'] = metric
+            iface_cfg['DEFROUTE'] = True
+            if is_ipv6_addr(gateway):
+                iface_cfg['IPV6_DEFAULTGW'] = gateway
+            else:
+                iface_cfg['GATEWAY'] = gateway
+            if metric is not None:
+                iface_cfg['METRIC'] = metric
 
     @classmethod
     def _render_bonding_opts(cls, iface_cfg, iface):
@@ -621,8 +644,8 @@ class Renderer(renderer.Renderer):
             route_cfg = iface_cfg.routes
 
             cls._render_subnets(
-                iface_cfg, iface_subnets, network_state.has_default_route,
-                flavor
+                iface_cfg, route_cfg, iface_subnets,
+                network_state.has_default_route, flavor
             )
             cls._render_subnet_routes(
                 iface_cfg, route_cfg, iface_subnets, flavor
@@ -655,8 +678,8 @@ class Renderer(renderer.Renderer):
             iface_subnets = iface.get("subnets", [])
             route_cfg = iface_cfg.routes
             cls._render_subnets(
-                iface_cfg, iface_subnets, network_state.has_default_route,
-                flavor
+                iface_cfg, route_cfg, iface_subnets,
+                network_state.has_default_route, flavor
             )
             cls._render_subnet_routes(
                 iface_cfg, route_cfg, iface_subnets, flavor
@@ -702,8 +725,8 @@ class Renderer(renderer.Renderer):
             iface_subnets = iface.get("subnets", [])
             route_cfg = iface_cfg.routes
             cls._render_subnets(
-                iface_cfg, iface_subnets, network_state.has_default_route,
-                flavor
+                iface_cfg, route_cfg, iface_subnets,
+                network_state.has_default_route, flavor
             )
             cls._render_subnet_routes(
                 iface_cfg, route_cfg, iface_subnets, flavor
@@ -793,8 +816,8 @@ class Renderer(renderer.Renderer):
             iface_subnets = iface.get("subnets", [])
             route_cfg = iface_cfg.routes
             cls._render_subnets(
-                iface_cfg, iface_subnets, network_state.has_default_route,
-                flavor
+                iface_cfg, route_cfg, iface_subnets,
+                network_state.has_default_route, flavor
             )
             cls._render_subnet_routes(
                 iface_cfg, route_cfg, iface_subnets, flavor
@@ -810,8 +833,8 @@ class Renderer(renderer.Renderer):
             iface_subnets = iface.get("subnets", [])
             route_cfg = iface_cfg.routes
             cls._render_subnets(
-                iface_cfg, iface_subnets, network_state.has_default_route,
-                flavor
+                iface_cfg, route_cfg, iface_subnets,
+                network_state.has_default_route, flavor
             )
             cls._render_subnet_routes(
                 iface_cfg, route_cfg, iface_subnets, flavor
@@ -848,11 +871,19 @@ class Renderer(renderer.Renderer):
                     if iface_cfg:
                         contents[iface_cfg.path] = iface_cfg.to_string()
             if iface_cfg.routes:
-                for cpath, proto in zip([iface_cfg.routes.path_ipv4,
-                                         iface_cfg.routes.path_ipv6],
-                                        ["ipv4", "ipv6"]):
-                    if cpath not in contents:
-                        contents[cpath] = iface_cfg.routes.to_string(proto)
+                # Format routes. Note that path_ipv4 and path_ipv6 can be the
+                # same file path, in which case both IPv4 and IPv6 routes are
+                # written in the same file.
+                path_ipv4 = iface_cfg.routes.path_ipv4
+                path_ipv6 = iface_cfg.routes.path_ipv6
+                if path_ipv4 == path_ipv6:
+                    contents[path_ipv4] = iface_cfg.routes.to_string(
+                        'all', flavor)
+                else:
+                    for cpath, proto in zip([path_ipv4, path_ipv6],
+                                            ["ipv4", "ipv6"]):
+                        contents[cpath] = iface_cfg.routes.to_string(
+                            proto, flavor)
         return contents
 
     def render_network_state(self, network_state, templates=None, target=None):
